@@ -4,9 +4,7 @@ GitHub Actions tarafından her gün otomatik çalıştırılır.
 """
 
 import asyncio
-import json
 import os
-import re
 from datetime import datetime
 from pathlib import Path
 
@@ -17,62 +15,6 @@ from openpyxl.utils import get_column_letter
 
 
 SCREENER_URL = "https://tr.tradingview.com/screener/"
-
-# Türkçe format için kısaltma eşleşmeleri
-def format_hacim(value_str: str) -> str:
-    """Ham hacim değerini Türkçe kısaltmalı formata çevirir."""
-    if not value_str or value_str in ("—", "-", ""):
-        return ""
-    
-    # Zaten K/M/B ekli gelebilir (TradingView'dan)
-    match = re.match(r"^(-?[\d.,]+)\s*([KkMmBb]?)$", value_str.strip())
-    if not match:
-        return value_str
-    
-    num_str = match.group(1).replace(",", ".")
-    suffix = match.group(2).upper()
-
-    try:
-        raw = float(num_str)
-    except ValueError:
-        return value_str
-
-    multipliers = {"K": 1_000, "M": 1_000_000, "B": 1_000_000_000}
-    raw *= multipliers.get(suffix, 1)
-
-    abs_val = abs(raw)
-    sign = "-" if raw < 0 else ""
-
-    if abs_val >= 1e9:
-        return f"{sign}{abs_val / 1e9:.2f}Mr".replace(".", ",")
-    elif abs_val >= 1e6:
-        return f"{sign}{abs_val / 1e6:.2f}M".replace(".", ",")
-    elif abs_val >= 1e3:
-        return f"{sign}{abs_val / 1e3:.2f}B".replace(".", ",")
-    else:
-        return f"{sign}{int(abs_val)}"
-
-
-def clean_value(value: str, col_index: int, header: str) -> str:
-    """Hücre değerini temizler ve gerekirse dönüştürür."""
-    value = value.strip()
-
-    # Fiyat sütunu — " TRY" temizle
-    if col_index == 1:
-        return value.replace(" TRY", "")
-
-    # Ortalama Hacim sütunu
-    if "ort" in header.lower() and "hacim" in header.lower():
-        return format_hacim(value)
-
-    # Sayısal sütunlar (index 2-14)
-    if 2 <= col_index <= 14:
-        value = value.replace("\u2212", "-")  # Unicode eksi işareti
-        value = value.replace("%", "")
-        value = value.replace(",", ".")
-        if value in ("", "—", "-", "\u2014"):
-            return ""
-    return value
 
 
 async def scroll_to_load_all(page) -> None:
@@ -182,22 +124,10 @@ def build_excel(headers: list[str], rows: list[list[str]], output_path: Path) ->
 
     ws.row_dimensions[1].height = 30
 
-    # Veri satırları
+    # Veri satırları - Tür değişimi iptal edildi
     for row_idx, row_data in enumerate(rows, start=2):
         is_alt = (row_idx % 2 == 0)
         for col_idx, cell_value in enumerate(row_data):
-            header = headers[col_idx] if col_idx < len(headers) else ""
-            cleaned = clean_value(cell_value, col_idx, header)
-
-            # Sayıya çevirmeyi dene (metin formatındaki hacim hariç)
-            is_hacim_col = "ort" in header.lower() and "hacim" in header.lower()
-            numeric = None
-            if not is_hacim_col and col_idx > 0:
-                try:
-                    numeric = float(cleaned)
-                except (ValueError, TypeError):
-                    pass
-
             cell = ws.cell(row=row_idx, column=col_idx + 1)
             cell.border = cell_border
             cell.alignment = Alignment(horizontal="center", vertical="center")
@@ -205,16 +135,8 @@ def build_excel(headers: list[str], rows: list[list[str]], output_path: Path) ->
             if is_alt:
                 cell.fill = alt_fill
 
-            if numeric is not None:
-                cell.value = numeric
-                # Yüzde sütunları (index 2-12, RSI ve hacim hariç)
-                if 2 <= col_idx <= 12 and "rsi" not in header.lower():
-                    cell.number_format = "0.00%"
-                    cell.value = numeric / 100
-                else:
-                    cell.number_format = '#,##0.00'
-            else:
-                cell.value = cleaned
+            # Çekilen veriyi sadece başındaki/sonundaki boşlukları alarak direkt yazıyoruz
+            cell.value = cell_value.strip() if cell_value else ""
 
     # Sütun genişlikleri otomatik ayarla
     for col_idx, header in enumerate(headers, start=1):
