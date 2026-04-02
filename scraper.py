@@ -17,11 +17,52 @@ from openpyxl.utils import get_column_letter
 SCREENER_URL = "https://tr.tradingview.com/screener/"
 
 
+def clean_and_parse(value_str: str) -> tuple[any, str]:
+    """Değeri temizler ve doğru Excel veri tipine (Sayı/Yüzde/Metin) dönüştürür."""
+    val = value_str.strip()
+    if not val or val in ("—", "-", "\u2014"):
+        return "", "text"
+        
+    # 1. TRY temizliği
+    val = val.replace(" TRY", "")
+    
+    # 2. Yüzde kontrolü
+    is_percentage = "%" in val
+    val = val.replace("%", "").replace("\u2212", "-").strip()
+    
+    # 3. Çarpanlar (Hacim, Piyasa Değeri vb. M/B/K kısaltmaları için)
+    multiplier = 1
+    if val.endswith("K") or val.endswith("k"):
+        multiplier = 1_000
+        val = val[:-1]
+    elif val.endswith("M") or val.endswith("m"):
+        multiplier = 1_000_000
+        val = val[:-1]
+    elif val.endswith("B") or val.endswith("b"):
+        multiplier = 1_000_000_000
+        val = val[:-1]
+    elif val.endswith("Mr"):
+        multiplier = 1_000_000_000
+        val = val[:-2]
+        
+    # 4. Sayı formati düzeltme (1.234,56 -> 1234.56)
+    val_clean = val.replace(".", "").replace(",", ".")
+    
+    try:
+        numeric_val = float(val_clean) * multiplier
+        if is_percentage:
+            return numeric_val / 100, "percentage"
+        else:
+            return numeric_val, "number"
+    except ValueError:
+        # Sayıya çevrilemiyorsa (Örn: Sektör adı) metin olarak bırak
+        return value_str.strip().replace(" TRY", ""), "text"
+
+
 async def scroll_to_load_all(page) -> None:
     """Tüm hisseler yüklenene kadar sayfayı kaydırır."""
     print("🔄 Scroll başlıyor...")
 
-    # Scroll container'ı bul
     container = await page.query_selector(".wrapper-fFDq5D2D")
     if not container:
         container = await page.query_selector("[class*='wrapper-']")
@@ -59,8 +100,6 @@ async def scroll_to_load_all(page) -> None:
 
 async def extract_data(page) -> tuple[list[str], list[list[str]]]:
     """Tablo başlıklarını ve verilerini çeker."""
-
-    # Başlıklar
     headers = await page.evaluate("""
         () => {
             const cells = document.querySelectorAll('thead th[role="columnheader"], thead th, th');
@@ -69,7 +108,6 @@ async def extract_data(page) -> tuple[list[str], list[list[str]]]:
     """)
     print(f"📋 Başlıklar ({len(headers)} adet): {headers}")
 
-    # Satır verileri
     rows = await page.evaluate("""
         () => {
             const rows = document.querySelectorAll(
@@ -104,7 +142,6 @@ def build_excel(headers: list[str], rows: list[list[str]], output_path: Path) ->
     ws = wb.active
     ws.title = "BIST Screener"
 
-    # Stil tanımları
     header_font = Font(bold=True, color="FFFFFF", size=11)
     header_fill = PatternFill("solid", fgColor="4A6CF7")
     header_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
@@ -114,7 +151,6 @@ def build_excel(headers: list[str], rows: list[list[str]], output_path: Path) ->
 
     alt_fill = PatternFill("solid", fgColor="F4F6FF")
 
-    # Başlık satırı
     for col_idx, header in enumerate(headers, start=1):
         cell = ws.cell(row=1, column=col_idx, value=header)
         cell.font = header_font
@@ -124,7 +160,7 @@ def build_excel(headers: list[str], rows: list[list[str]], output_path: Path) ->
 
     ws.row_dimensions[1].height = 30
 
-    # Veri satırları - Tür değişimi iptal edildi
+    # Veri satırları işlemleri
     for row_idx, row_data in enumerate(rows, start=2):
         is_alt = (row_idx % 2 == 0)
         for col_idx, cell_value in enumerate(row_data):
@@ -135,23 +171,39 @@ def build_excel(headers: list[str], rows: list[list[str]], output_path: Path) ->
             if is_alt:
                 cell.fill = alt_fill
 
-            # Çekilen veriyi sadece başındaki/sonundaki boşlukları alarak direkt yazıyoruz
-            cell.value = cell_value.strip() if cell_value else ""
+            # İlk sütun Hisse Kodu olduğu için direkt metin olarak yazarız
+            if col_idx == 0:
+                cell.value = cell_value.strip()
+            else:
+                # Diğer sütunları sayı/yüzde olarak parse ediyoruz
+                final_val, fmt = clean_and_parse(cell_value)
+                cell.value = final_val
+                
+                # Excel hücre formatlarını belirliyoruz
+                if fmt == "percentage":
+                    cell.number_format = "0.00%"
+                elif fmt == "number":
+                    # Milyonluk/Milyarlık hacimler gibi tam sayılarda virgülden sonrasını gizle,
+                    # Fiyat gibi küçük sayılarda virgülden sonra 2 hane göster.
+                    if isinstance(final_val, float) and final_val.is_integer() and abs(final_val) >= 1000:
+                        cell.number_format = '#,##0'
+                    else:
+                        cell.number_format = '#,##0.00'
 
-    # Sütun genişlikleri otomatik ayarla
+    # Sütun genişliklerini ayarla
     for col_idx, header in enumerate(headers, start=1):
         col_letter = get_column_letter(col_idx)
         max_len = len(header)
         for row in ws.iter_rows(min_row=2, min_col=col_idx, max_col=col_idx):
             for c in row:
-                if c.value:
-                    max_len = max(max_len, len(str(c.value)))
+                if c.value is not None and c.value != "":
+                    # Yüzde formatı genişlik hesabı için metin uzunluğunu tahmin et
+                    str_len = len(f"{c.value:.2f}") if isinstance(c.value, float) else len(str(c.value))
+                    max_len = max(max_len, str_len)
         ws.column_dimensions[col_letter].width = min(max_len + 4, 25)
 
-    # Dondur: başlık satırı sabit kalsın
     ws.freeze_panes = "A2"
 
-    # Metadata sayfası
     meta = wb.create_sheet("Bilgi")
     meta["A1"] = "Çekilme Tarihi"
     meta["B1"] = datetime.now().strftime("%d.%m.%Y %H:%M")
@@ -172,7 +224,6 @@ async def main():
     output_path = output_dir / f"bist_screener_{today}.xlsx"
     latest_path = output_dir / "bist_screener_latest.xlsx"
 
-    # TradingView oturum cookie'si (GitHub Secret'tan okunur)
     tv_session = os.environ.get("TV_SESSION_ID", "")
 
     async with async_playwright() as p:
@@ -196,7 +247,6 @@ async def main():
             locale="tr-TR",
         )
 
-        # Oturum cookie'si varsa ekle
         if tv_session:
             await context.add_cookies([{
                 "name": "sessionid",
@@ -210,7 +260,6 @@ async def main():
 
         page = await context.new_page()
 
-        # Bot tespitini zorlaştır
         await page.add_init_script("""
             Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
         """)
@@ -219,10 +268,8 @@ async def main():
         await page.goto(SCREENER_URL, wait_until="networkidle", timeout=60_000)
         await asyncio.sleep(3)
 
-        # Tüm verileri yükle
         await scroll_to_load_all(page)
 
-        # Veri çek
         headers, rows = await extract_data(page)
 
         if not rows:
@@ -230,15 +277,12 @@ async def main():
 
         await browser.close()
 
-    # Excel oluştur
     build_excel(headers, rows, output_path)
 
-    # "latest" kopyasını da güncelle
     import shutil
     shutil.copy2(output_path, latest_path)
     print(f"✅ Latest kopyası güncellendi: {latest_path}")
 
-    # Özet
     print(f"\n📊 ÖZET")
     print(f"   Tarih    : {today}")
     print(f"   Hisse    : {len(rows)}")
