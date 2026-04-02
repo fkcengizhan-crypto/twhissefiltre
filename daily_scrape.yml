@@ -1,0 +1,72 @@
+name: BIST Screener - Günlük Veri Çekimi
+
+on:
+  schedule:
+    # Her gün 18:30 Türkiye saati = 15:30 UTC (yaz saati: UTC+3)
+    - cron: "30 15 * * 1-5"   # Pazartesi–Cuma (borsa günleri)
+
+  # Elle de çalıştırabilmek için
+  workflow_dispatch:
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    permissions:
+      contents: write   # Repo'ya commit atabilmek için
+
+    steps:
+      # ── 1. Kodu çek ──────────────────────────────────────────────
+      - name: Repo'yu çek
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # Tüm geçmişi çek (commit için gerekli)
+
+      # ── 2. Python kur ─────────────────────────────────────────────
+      - name: Python 3.11 kur
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      # ── 3. Bağımlılıkları yükle ───────────────────────────────────
+      - name: Bağımlılıkları yükle
+        run: |
+          pip install -r requirements.txt
+          playwright install chromium
+          playwright install-deps chromium
+
+      # ── 4. Scraper'ı çalıştır ─────────────────────────────────────
+      - name: Veri çek
+        env:
+          TV_SESSION_ID: ${{ secrets.TV_SESSION_ID }}
+        run: python scraper.py
+
+      # ── 5. Excel dosyasını repo'ya kaydet ─────────────────────────
+      - name: Excel'i repo'ya commit et
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add data/
+
+          # Değişiklik yoksa commit atma
+          if git diff --staged --quiet; then
+            echo "ℹ️  Yeni veri yok, commit atlanıyor."
+          else
+            DATE=$(date +'%d.%m.%Y %H:%M')
+            ROWS=$(python -c "
+          import openpyxl, glob, os
+          files = sorted(glob.glob('data/bist_screener_2*.xlsx'))
+          if files:
+              wb = openpyxl.load_workbook(files[-1])
+              ws = wb.active
+              print(ws.max_row - 1)
+          else:
+              print('?')
+          ")
+            git commit -m "📊 BIST Screener | $DATE | $ROWS hisse"
+            git push
+            echo "✅ Commit atıldı: $DATE — $ROWS hisse"
+          fi
