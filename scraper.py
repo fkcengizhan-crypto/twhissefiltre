@@ -60,41 +60,69 @@ def clean_and_parse(value_str: str) -> tuple[any, str]:
 
 
 async def scroll_to_load_all(page) -> None:
-    """Tüm hisseler yüklenene kadar sayfayı kaydırır."""
+    """Tüm hisseler yüklenene kadar gerçek kaydırma kabını bulup kaydırır."""
     print("🔄 Scroll başlıyor...")
 
-    container = await page.query_selector(".wrapper-fFDq5D2D")
-    if not container:
-        container = await page.query_selector("[class*='wrapper-']")
+    result = await page.evaluate("""
+        async () => {
+            const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-    prev_count = 0
-    unchanged = 0
-    iteration = 0
+            const findContainer = () => {
+                const cands = Array.from(document.querySelectorAll('*')).filter(el => {
+                    const st = getComputedStyle(el);
+                    return el.scrollHeight > el.clientHeight + 5 &&
+                           /auto|scroll/.test(st.overflowY) &&
+                           el.querySelectorAll('tbody tr').length > 0;
+                });
+                if (!cands.length) return null;
+                cands.sort((a, b) =>
+                    b.querySelectorAll('tbody tr').length - a.querySelectorAll('tbody tr').length
+                );
+                return cands[0];
+            };
 
-    while unchanged < 8 and iteration < 100:
-        iteration += 1
+            const logs = [];
+            let container = findContainer();
+            let prev_count = 0;
+            let unchanged = 0;
+            let iteration = 0;
 
-        if container:
-            await page.evaluate("el => el.scrollTop = el.scrollHeight", container)
-        else:
-            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            while (unchanged < 8 && iteration < 100) {
+                iteration += 1;
 
-        await asyncio.sleep(2)
+                if (container) {
+                    container.scrollTop = container.scrollHeight;
+                } else {
+                    window.scrollTo(0, document.body.scrollHeight);
+                }
 
-        current_count = await page.evaluate(
-            "document.querySelectorAll('tbody tr').length"
-        )
+                await sleep(2000);
 
-        print(f"  İterasyon {iteration}: {current_count} satır (önceki: {prev_count})")
+                const current_count = container
+                    ? container.querySelectorAll('tbody tr').length
+                    : document.querySelectorAll('tbody tr').length;
 
-        if current_count == prev_count:
-            unchanged += 1
-        else:
-            unchanged = 0
+                logs.push(`  İterasyon ${iteration}: ${current_count} satır (önceki: ${prev_count})`);
 
-        prev_count = current_count
+                if (current_count === prev_count) {
+                    unchanged += 1;
+                } else {
+                    unchanged = 0;
+                }
 
-    print(f"✅ Scroll tamamlandı. Toplam {prev_count} satır.")
+                prev_count = current_count;
+            }
+
+            return { logs, total: prev_count };
+        }
+    """)
+
+    logs = result["logs"]
+    final_total = result["total"]
+
+    for line in logs:
+        print(line)
+    print(f"✅ Scroll tamamlandı. Toplam {final_total} satır.")
     await asyncio.sleep(2)
 
 
